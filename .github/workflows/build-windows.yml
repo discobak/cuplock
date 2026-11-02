@@ -1,0 +1,73 @@
+name: Gerar app Windows
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versão para publicar como atualização (ex: 3.1.0). Deixe vazio para só compilar."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Definir versão
+        if: ${{ inputs.version != '' }}
+        shell: bash
+        run: |
+          V="${{ inputs.version }}"
+          V="${V#v}"
+          if ! [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "Versão inválida: use o formato 3.1.0"; exit 1; fi
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$V\"/" desktop/src-tauri/tauri.conf.json desktop/package.json
+          sed -i "0,/^version = \"[^\"]*\"/s//version = \"$V\"/" desktop/src-tauri/Cargo.toml
+          sed -i "s/const VERSION = \"[^\"]*\"/const VERSION = \"$V\"/" client/app.js
+          echo "APP_VERSION=$V" >> $GITHUB_ENV
+
+      - name: Baixar supabase-js
+        shell: bash
+        run: |
+          mkdir -p /tmp/sb && cd /tmp/sb && npm init -y >/dev/null && npm i @supabase/supabase-js@2 --silent
+          cp /tmp/sb/node_modules/@supabase/supabase-js/dist/umd/supabase.js "$GITHUB_WORKSPACE/client/supabase.js"
+
+      - name: Configurar app
+        shell: bash
+        run: |
+          printf 'window.CUPLOCK_CONFIG.UPDATE_REPO = "%s";\n' "${{ github.repository }}" >> client/config.js
+
+      - name: Compilar app
+        working-directory: desktop
+        run: |
+          npm install
+          npx tauri build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cuplock-Windows
+          path: desktop/src-tauri/target/release/bundle/nsis/*.exe
+
+      - name: Publicar atualização
+        if: ${{ env.APP_VERSION != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.APP_VERSION }}
+          name: Cuplock ${{ env.APP_VERSION }}
+          body: Nova versão do Cuplock. Os apps instalados se atualizam sozinhos.
+          files: desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
